@@ -20,6 +20,7 @@ import { Url } from '../../utils/url.js';
 import { ActivityService } from '../activity.js';
 import { type CimdMetadata, detectClientIdType, fetchCimdMetadata, getAllowedDomains } from './cimd.js';
 import { OAuthError } from './types/error.js';
+import { CimdEgressError, validateCimdHostnameEgress } from './utils/cimd-egress.js';
 import { isDomainAllowed } from './utils/domain.js';
 import { matchRedirectUri, validateRedirectUri } from './utils/redirect.js';
 
@@ -1489,6 +1490,24 @@ export class McpOAuthService {
 			const expiresAt = existing['metadata_expires_at'] ? new Date(existing['metadata_expires_at']).getTime() : 0;
 
 			if (expiresAt > Date.now()) {
+				try {
+					await validateCimdHostnameEgress(new URL(clientId).hostname);
+				} catch (err) {
+					if (err instanceof CimdEgressError) {
+						logger.warn(
+							{
+								client_id: clientId,
+								reason: err.reason,
+							},
+							'CIMD cached metadata egress validation failed',
+						);
+
+						throw new OAuthError(400, 'invalid_client_metadata', 'Failed to fetch client metadata document');
+					}
+
+					throw err;
+				}
+
 				return existing; // Fresh cache
 			}
 

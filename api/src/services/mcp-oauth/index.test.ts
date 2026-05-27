@@ -70,12 +70,32 @@ const mockDetectClientIdType = vi.fn().mockReturnValue('dcr');
 const mockFetchCimdMetadata = vi.fn();
 const mockGetAllowedDomains = vi.fn().mockReturnValue([]);
 const mockIsDomainAllowed = vi.fn().mockReturnValue(true);
+const mockValidateCimdHostnameEgress = vi.fn().mockResolvedValue(undefined);
+
+const { MockCimdEgressError } = vi.hoisted(() => {
+	class MockCimdEgressError extends Error {
+		reason: string;
+
+		constructor(reason: string) {
+			super(reason);
+			this.name = 'CimdEgressError';
+			this.reason = reason;
+		}
+	}
+
+	return { MockCimdEgressError };
+});
 
 vi.mock('./cimd.js', () => ({
 	detectClientIdType: (...args: unknown[]) => mockDetectClientIdType(...args),
 	fetchCimdMetadata: (...args: unknown[]) => mockFetchCimdMetadata(...args),
 	getAllowedDomains: (...args: unknown[]) => mockGetAllowedDomains(...args),
 	isDomainAllowed: (...args: unknown[]) => mockIsDomainAllowed(...args),
+}));
+
+vi.mock('./utils/cimd-egress.js', () => ({
+	CimdEgressError: MockCimdEgressError,
+	validateCimdHostnameEgress: (...args: unknown[]) => mockValidateCimdHostnameEgress(...args),
 }));
 
 const mockTranslateDatabaseError = vi.fn().mockResolvedValue(new Error('unknown'));
@@ -205,6 +225,7 @@ describe('McpOAuthService', () => {
 		mockFetchCimdMetadata.mockReset();
 		mockGetAllowedDomains.mockReturnValue([]);
 		mockIsDomainAllowed.mockReturnValue(true);
+		mockValidateCimdHostnameEgress.mockResolvedValue(undefined);
 		mockTranslateDatabaseError.mockResolvedValue(new Error('unknown'));
 		vi.clearAllMocks();
 	});
@@ -3254,6 +3275,7 @@ describe('McpOAuthService', () => {
 			const result = await service.resolveClientWithFetch(dcrClientId);
 			expect(result['client_id']).toBe(dcrClientId);
 			expect(result['client_name']).toBe('Test DCR Client');
+			expect(mockValidateCimdHostnameEgress).not.toHaveBeenCalled();
 		});
 
 		it('DCR UUID not found throws error', async () => {
@@ -3293,7 +3315,39 @@ describe('McpOAuthService', () => {
 
 			const result = await service.resolveClientWithFetch(cimdClientId);
 			expect(result['client_name']).toBe('Cached CIMD Client');
+			expect(mockValidateCimdHostnameEgress).toHaveBeenCalledWith('tools.example.com');
 			// fetchCimdMetadata should NOT have been called
+			expect(mockFetchCimdMetadata).not.toHaveBeenCalled();
+		});
+
+		it('CIMD fresh cache hit egress rejection throws invalid_client_metadata without fetch', async () => {
+			mockDetectClientIdType.mockReturnValue('cimd');
+			mockValidateCimdHostnameEgress.mockRejectedValue(new MockCimdEgressError('blocked private address'));
+
+			tracker.on.select('directus_settings').response([{ mcp_oauth_cimd_enabled: true }]);
+
+			tracker.on.select('directus_oauth_clients').response([
+				{
+					client_id: cimdClientId,
+					client_name: 'Cached CIMD Client',
+					redirect_uris: JSON.stringify([TEST_REDIRECT_URI]),
+					metadata_expires_at: new Date(Date.now() + 3600_000),
+					metadata_fetched_at: new Date(),
+					registration_type: 'cimd',
+				},
+			]);
+
+			try {
+				await service.resolveClientWithFetch(cimdClientId);
+				expect.fail('Expected OAuthError to be thrown');
+			} catch (err) {
+				expect(err).toBeInstanceOf(OAuthError);
+				expect((err as OAuthError).status).toBe(400);
+				expect((err as OAuthError).code).toBe('invalid_client_metadata');
+				expect((err as OAuthError).description).toBe('Failed to fetch client metadata document');
+			}
+
+			expect(mockValidateCimdHostnameEgress).toHaveBeenCalledWith('tools.example.com');
 			expect(mockFetchCimdMetadata).not.toHaveBeenCalled();
 		});
 
